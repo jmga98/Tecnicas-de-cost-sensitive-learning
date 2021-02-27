@@ -42,7 +42,6 @@ CNAE3_levels <- sort(union(unique(dataENS.dt$CNAE_AS), unique(dataENS.dt$CNAE_AS
 CNAE2_levels <- sort(union(unique(Code3toCode2(dataENS.dt$CNAE_AS)), unique(Code3toCode2(dataENS.dt$CNAE_AS))))
 CNAE1_levels <- sort(union(unique(CNAE2toCNAE1(Code3toCode2(dataENS.dt$CNAE_AS))), unique(CNAE2toCNAE1(Code3toCode2(dataENS.dt$CNAE_AS)))))
 
-### Se definen nuevas variables y se pasan las variables categóricas a factores 
 dataENS.dt[
   , grupoEdad        := factor(ageGroup(EDADa))][
   , CNO1_AS_raw      := factor(CNO2toCNO1(Code3toCode2(CNO_AS_raw)), levels = CNO1_levels)][
@@ -63,7 +62,6 @@ dataENS.dt[
   , CNAE2_AS         := factor(Code3toCode2(CNAE_AS), levels = CNAE2_levels)][
   , CNAE3_AS         := factor(CNAE_AS, levels = CNAE3_levels)]
 
-# Se reimputan los valores NA a *
 for (j in seq_len(ncol(dataENS.dt))){
   
   set(dataENS.dt, which(is.na(dataENS.dt[[j]])), j, '*')
@@ -187,19 +185,17 @@ for (iter in 1:nIter){
   
   set.seed(seeds[iter])
   train_index <- createDataPartition(
-    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  # Division de toda la base de 
-  # datos en train (80%)
-  # y test (20%)
+    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  
   dataENS_train.dt <- dataENS.dt[train_index]
   dataENS_test.dt  <- dataENS.dt[-train_index]
   
   cat(' ok.\n')
   cat('    Computing cost-sensitive model CNO1...\n')
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 1                      ####
+  ####                      MODELO COST-SENSITIVE C = 1.4                    ####
   
   ## ..............................  CNO1  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 1            ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 1.4        ####
   
   set.seed(seeds[iter])
   normalRF_CNO1_c1 <- ranger(
@@ -210,8 +206,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -236,7 +232,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO1_test_c1), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 1',
+    model     = 'Cost c1',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO1',
@@ -256,7 +252,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO1_c1 <- importance(normalRF_CNO1_c1)
   importance_normalRF_CNO1_c1.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO1_c1)),
-    model      = 'Cost c = 1',
+    model      = 'Cost c1',
     regressor  = names(importance_normalRF_CNO1_c1),
     importance = importance_normalRF_CNO1_c1,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO1_c1)]),
@@ -267,15 +263,27 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 1.4/2.4
+  
+  func_score = list()
+  for (i in 1:length(pred_normalRF_prob_CNO1_c1$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO1_c1$predictions[i, '1'] > pthresh){
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO1_c1$predictions[i, '1']
+    } else {
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO1_c1$predictions[i, '0'] * 1.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c1.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO1_c1$predictions[, '1'] * 1,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO1_c1$predictions[, '1'] * 1,
-    CNO1_AS_true = dataENS_test.dt$CNO1_AS_true,
-    CNO1_AS_raw  = dataENS_test.dt$CNO1_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO1_c1$predictions[, '1'],
+    score        = func_score,
+    CNO1_true = dataENS_test.dt$CNO1_true,
+    CNO1_raw  = dataENS_test.dt$CNO1_raw)
   
   pseudobias_eval_prob_c1.dt <- copy(pseudobias_eval_c1.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -286,8 +294,8 @@ for (iter in 1:nIter){
     CNO1_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c1.dt)){
     pseudobias_eval_prob_c1.dt[
-      1:i, CNO1_AS_running := CNO1_AS_true][
-        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_AS_raw]
+      1:i, CNO1_AS_running := CNO1_true][
+        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_raw]
     CNO1_running_total_prob_c1.dt <- rbindlist(list(
       CNO1_running_total_prob_c1.dt, 
       pseudobias_eval_prob_c1.dt[, list(ned = i, CNO1_running_total = sum(factor)), by = 'CNO1_AS_running']))
@@ -295,7 +303,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO1_running_total_prob_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'prob'][
     , pseudobias := abs(CNO1_running_total - CNO1_running_total[n])/CNO1_running_total[n], by = 'CNO1_AS_running']
   setcolorder(CNO1_running_total_prob_c1.dt, names(CNO1_total_prob.dt))
@@ -314,8 +322,8 @@ for (iter in 1:nIter){
     CNO1_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c1.dt)){
     pseudobias_eval_score_c1.dt[
-      1:i, CNO1_AS_running := CNO1_AS_true][
-        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_AS_raw]
+      1:i, CNO1_AS_running := CNO1_true][
+        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_raw]
     CNO1_running_total_score_c1.dt <- rbindlist(list(
       CNO1_running_total_score_c1.dt, 
       pseudobias_eval_score_c1.dt[, list(ned = i, CNO1_running_total = sum(factor)), by = 'CNO1_AS_running']))
@@ -323,7 +331,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO1_running_total_score_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'score'][
     , pseudobias := abs(CNO1_running_total - CNO1_running_total[n])/CNO1_running_total[n], by = 'CNO1_AS_running']
   
@@ -334,10 +342,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 10                     ####
+  ####                      MODELO COST-SENSITIVE C = 2.4                    ####
   
-  ## ..............................  CNO1  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 10          ####
+  ## ..............................  CNO1  ..................................   ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 2.4          ####
   
   set.seed(seeds[iter])
   normalRF_CNO1_c10 <- ranger(
@@ -348,8 +356,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -374,7 +382,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO1_test_c10), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 10',
+    model     = 'Cost c2',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO1',
@@ -394,7 +402,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO1_c10 <- importance(normalRF_CNO1_c10)
   importance_normalRF_CNO1_c10.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO1_c10)),
-    model      = 'Cost c = 10',
+    model      = 'Cost c2',
     regressor  = names(importance_normalRF_CNO1_c10),
     importance = importance_normalRF_CNO1_c10,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO1_c10)]),
@@ -405,15 +413,25 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 2.4/3.4
+  for (i in 1:length(pred_normalRF_prob_CNO1_c10$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO1_c10$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO1_c10$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO1_c10$predictions[i, '0'] * 2.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c10.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO1_c10$predictions[, '1'] * 10,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO1_c10$predictions[, '1'] * 10,
-    CNO1_AS_true = dataENS_test.dt$CNO1_AS_true,
-    CNO1_AS_raw  = dataENS_test.dt$CNO1_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO1_c10$predictions[, '1'],
+    score        = func_score,
+    CNO1_true = dataENS_test.dt$CNO1_true,
+    CNO1_raw  = dataENS_test.dt$CNO1_raw)
   
   pseudobias_eval_prob_c10.dt <- copy(pseudobias_eval_c10.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -424,8 +442,8 @@ for (iter in 1:nIter){
     CNO1_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c10.dt)){
     pseudobias_eval_prob_c10.dt[
-      1:i, CNO1_AS_running := CNO1_AS_true][
-        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_AS_raw]
+      1:i, CNO1_AS_running := CNO1_true][
+        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_raw]
     CNO1_running_total_prob_c10.dt <- rbindlist(list(
       CNO1_running_total_prob_c10.dt, 
       pseudobias_eval_prob_c10.dt[, list(ned = i, CNO1_running_total = sum(factor)), by = 'CNO1_AS_running']))
@@ -433,7 +451,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO1_running_total_prob_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'prob'][
     , pseudobias := abs(CNO1_running_total - CNO1_running_total[n])/CNO1_running_total[n], by = 'CNO1_AS_running']
   setcolorder(CNO1_running_total_prob_c10.dt, names(CNO1_total_prob.dt))
@@ -452,8 +470,8 @@ for (iter in 1:nIter){
     CNO1_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c10.dt)){
     pseudobias_eval_score_c10.dt[
-      1:i, CNO1_AS_running := CNO1_AS_true][
-        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_AS_raw]
+      1:i, CNO1_AS_running := CNO1_true][
+        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_raw]
     CNO1_running_total_score_c10.dt <- rbindlist(list(
       CNO1_running_total_score_c10.dt, 
       pseudobias_eval_score_c10.dt[, list(ned = i, CNO1_running_total = sum(factor)), by = 'CNO1_AS_running']))
@@ -461,7 +479,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO1_running_total_score_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'score'][
     , pseudobias := abs(CNO1_running_total - CNO1_running_total[n])/CNO1_running_total[n], by = 'CNO1_AS_running']
   
@@ -472,10 +490,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 100                    ####
+  ####                      MODELO COST-SENSITIVE C = 5.7                    ####
   
-  ## ..............................  CNO1  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 100          ####
+  ## ..............................  CNO1  ..................................  ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 5.7         ####
   
   set.seed(seeds[iter])
   normalRF_CNO1_c100 <- ranger(
@@ -486,8 +504,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -512,7 +530,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO1_test_c100), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 100',
+    model     = 'Cost c3',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO1',
@@ -532,7 +550,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO1_c100 <- importance(normalRF_CNO1_c100)
   importance_normalRF_CNO1_c100.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO1_c100)),
-    model      = 'Cost c = 100',
+    model      = 'Cost c3',
     regressor  = names(importance_normalRF_CNO1_c100),
     importance = importance_normalRF_CNO1_c100,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO1_c100)]),
@@ -543,15 +561,25 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 5.7/6.7
+  for (i in 1:length(pred_normalRF_prob_CNO1_c100$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO1_c100$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO1_c100$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO1_c100$predictions[i, '0'] * 5.7
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c100.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO1_c100$predictions[, '1'] * 100,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO1_c100$predictions[, '1'] * 100,
-    CNO1_AS_true = dataENS_test.dt$CNO1_AS_true,
-    CNO1_AS_raw  = dataENS_test.dt$CNO1_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO1_c100$predictions[, '1'],
+    score        = func_score,
+    CNO1_true = dataENS_test.dt$CNO1_true,
+    CNO1_raw  = dataENS_test.dt$CNO1_raw)
   
   pseudobias_eval_prob_c100.dt <- copy(pseudobias_eval_c100.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -562,8 +590,8 @@ for (iter in 1:nIter){
     CNO1_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c100.dt)){
     pseudobias_eval_prob_c100.dt[
-      1:i, CNO1_AS_running := CNO1_AS_true][
-        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_AS_raw]
+      1:i, CNO1_AS_running := CNO1_true][
+        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_raw]
     CNO1_running_total_prob_c100.dt <- rbindlist(list(
       CNO1_running_total_prob_c100.dt, 
       pseudobias_eval_prob_c100.dt[, list(ned = i, CNO1_running_total = sum(factor)), by = 'CNO1_AS_running']))
@@ -571,7 +599,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO1_running_total_prob_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'prob'][
     , pseudobias := abs(CNO1_running_total - CNO1_running_total[n])/CNO1_running_total[n], by = 'CNO1_AS_running']
   setcolorder(CNO1_running_total_prob_c100.dt, names(CNO1_total_prob.dt))
@@ -590,8 +618,8 @@ for (iter in 1:nIter){
     CNO1_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c100.dt)){
     pseudobias_eval_score_c100.dt[
-      1:i, CNO1_AS_running := CNO1_AS_true][
-        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_AS_raw]
+      1:i, CNO1_AS_running := CNO1_true][
+        is.na(CNO1_AS_running), CNO1_AS_running := CNO1_raw]
     CNO1_running_total_score_c100.dt <- rbindlist(list(
       CNO1_running_total_score_c100.dt, 
       pseudobias_eval_score_c100.dt[, list(ned = i, CNO1_running_total = sum(factor)), by = 'CNO1_AS_running']))
@@ -599,7 +627,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO1_running_total_score_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'score'][
     , pseudobias := abs(CNO1_running_total - CNO1_running_total[n])/CNO1_running_total[n], by = 'CNO1_AS_running']
   
@@ -612,6 +640,7 @@ for (iter in 1:nIter){
   CNO1_total.dt <- rbindlist(list(
     CNO1_total_prob.dt, CNO1_total_score.dt))  
 }
+
 
 #saveRDS(auc.dt, file = file.path(path_data, 'auc.dt'))
 #saveRDS(importance.dt, file = file.path(path_data, 'importance.dt'))
@@ -628,19 +657,17 @@ for (iter in 1:nIter){
   
   set.seed(seeds[iter])
   train_index <- createDataPartition(
-    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  # Division de toda la base de 
-  # datos en train (80%)
-  # y test (20%)
+    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  
   dataENS_train.dt <- dataENS.dt[train_index]
   dataENS_test.dt  <- dataENS.dt[-train_index]
   
   cat(' ok.\n')
   cat('    Computing cost-sensitive model CNO2...\n')
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 1                      ####
-
+  ####                      MODELO COST-SENSITIVE C = 1.4                    ####
+  
   ## ..............................  CNO2  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 1            ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 1.4        ####
   
   set.seed(seeds[iter])
   normalRF_CNO2_c1 <- ranger(
@@ -651,8 +678,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -677,7 +704,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO2_test_c1), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 1',
+    model     = 'Cost c1',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO2',
@@ -697,7 +724,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO2_c1 <- importance(normalRF_CNO2_c1)
   importance_normalRF_CNO2_c1.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO2_c1)),
-    model      = 'Cost c = 1',
+    model      = 'Cost c1',
     regressor  = names(importance_normalRF_CNO2_c1),
     importance = importance_normalRF_CNO2_c1,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO2_c1)]),
@@ -708,15 +735,27 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 1.4/2.4
+  
+  func_score = list()
+  for (i in 1:length(pred_normalRF_prob_CNO2_c1$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO2_c1$predictions[i, '1'] > pthresh){
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO2_c1$predictions[i, '1']
+    } else {
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO2_c1$predictions[i, '0'] * 1.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c1.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO2_c1$predictions[, '1'] * 1,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO2_c1$predictions[, '1'] * 1,
-    CNO2_AS_true = dataENS_test.dt$CNO2_AS_true,
-    CNO2_AS_raw  = dataENS_test.dt$CNO2_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO2_c1$predictions[, '1'],
+    score        = func_score,
+    CNO2_true = dataENS_test.dt$CNO2_true,
+    CNO2_raw  = dataENS_test.dt$CNO2_raw)
   
   pseudobias_eval_prob_c1.dt <- copy(pseudobias_eval_c1.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -727,8 +766,8 @@ for (iter in 1:nIter){
     CNO2_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c1.dt)){
     pseudobias_eval_prob_c1.dt[
-      1:i, CNO2_AS_running := CNO2_AS_true][
-        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_AS_raw]
+      1:i, CNO2_AS_running := CNO2_true][
+        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_raw]
     CNO2_running_total_prob_c1.dt <- rbindlist(list(
       CNO2_running_total_prob_c1.dt, 
       pseudobias_eval_prob_c1.dt[, list(ned = i, CNO2_running_total = sum(factor)), by = 'CNO2_AS_running']))
@@ -736,7 +775,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO2_running_total_prob_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'prob'][
     , pseudobias := abs(CNO2_running_total - CNO2_running_total[n])/CNO2_running_total[n], by = 'CNO2_AS_running']
   setcolorder(CNO2_running_total_prob_c1.dt, names(CNO2_total_prob.dt))
@@ -755,8 +794,8 @@ for (iter in 1:nIter){
     CNO2_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c1.dt)){
     pseudobias_eval_score_c1.dt[
-      1:i, CNO2_AS_running := CNO2_AS_true][
-        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_AS_raw]
+      1:i, CNO2_AS_running := CNO2_true][
+        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_raw]
     CNO2_running_total_score_c1.dt <- rbindlist(list(
       CNO2_running_total_score_c1.dt, 
       pseudobias_eval_score_c1.dt[, list(ned = i, CNO2_running_total = sum(factor)), by = 'CNO2_AS_running']))
@@ -764,7 +803,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO2_running_total_score_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'score'][
     , pseudobias := abs(CNO2_running_total - CNO2_running_total[n])/CNO2_running_total[n], by = 'CNO2_AS_running']
   
@@ -775,10 +814,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 10                     ####
+  ####                      MODELO COST-SENSITIVE C = 2.4                    ####
   
-  ## ..............................  CNO2  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 10          ####
+  ## ..............................  CNO2  ..................................   ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 2.4          ####
   
   set.seed(seeds[iter])
   normalRF_CNO2_c10 <- ranger(
@@ -789,8 +828,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -815,7 +854,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO2_test_c10), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 10',
+    model     = 'Cost c2',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO2',
@@ -835,7 +874,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO2_c10 <- importance(normalRF_CNO2_c10)
   importance_normalRF_CNO2_c10.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO2_c10)),
-    model      = 'Cost c = 10',
+    model      = 'Cost c2',
     regressor  = names(importance_normalRF_CNO2_c10),
     importance = importance_normalRF_CNO2_c10,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO2_c10)]),
@@ -846,15 +885,25 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 2.4/3.4
+  for (i in 1:length(pred_normalRF_prob_CNO2_c10$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO2_c10$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO2_c10$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO2_c10$predictions[i, '0'] * 2.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c10.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO2_c10$predictions[, '1'] * 10,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO2_c10$predictions[, '1'] * 10,
-    CNO2_AS_true = dataENS_test.dt$CNO2_AS_true,
-    CNO2_AS_raw  = dataENS_test.dt$CNO2_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO2_c10$predictions[, '1'],
+    score        = func_score,
+    CNO2_true = dataENS_test.dt$CNO2_true,
+    CNO2_raw  = dataENS_test.dt$CNO2_raw)
   
   pseudobias_eval_prob_c10.dt <- copy(pseudobias_eval_c10.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -865,8 +914,8 @@ for (iter in 1:nIter){
     CNO2_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c10.dt)){
     pseudobias_eval_prob_c10.dt[
-      1:i, CNO2_AS_running := CNO2_AS_true][
-        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_AS_raw]
+      1:i, CNO2_AS_running := CNO2_true][
+        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_raw]
     CNO2_running_total_prob_c10.dt <- rbindlist(list(
       CNO2_running_total_prob_c10.dt, 
       pseudobias_eval_prob_c10.dt[, list(ned = i, CNO2_running_total = sum(factor)), by = 'CNO2_AS_running']))
@@ -874,7 +923,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO2_running_total_prob_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'prob'][
     , pseudobias := abs(CNO2_running_total - CNO2_running_total[n])/CNO2_running_total[n], by = 'CNO2_AS_running']
   setcolorder(CNO2_running_total_prob_c10.dt, names(CNO2_total_prob.dt))
@@ -893,8 +942,8 @@ for (iter in 1:nIter){
     CNO2_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c10.dt)){
     pseudobias_eval_score_c10.dt[
-      1:i, CNO2_AS_running := CNO2_AS_true][
-        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_AS_raw]
+      1:i, CNO2_AS_running := CNO2_true][
+        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_raw]
     CNO2_running_total_score_c10.dt <- rbindlist(list(
       CNO2_running_total_score_c10.dt, 
       pseudobias_eval_score_c10.dt[, list(ned = i, CNO2_running_total = sum(factor)), by = 'CNO2_AS_running']))
@@ -902,7 +951,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO2_running_total_score_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'score'][
     , pseudobias := abs(CNO2_running_total - CNO2_running_total[n])/CNO2_running_total[n], by = 'CNO2_AS_running']
   
@@ -913,10 +962,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 100                    ####
+  ####                      MODELO COST-SENSITIVE C = 5.7                    ####
   
-  ## ..............................  CNO2  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 100          ####
+  ## ..............................  CNO2  ..................................  ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 5.7         ####
   
   set.seed(seeds[iter])
   normalRF_CNO2_c100 <- ranger(
@@ -927,8 +976,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -953,7 +1002,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO2_test_c100), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 100',
+    model     = 'Cost c3',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO2',
@@ -973,7 +1022,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO2_c100 <- importance(normalRF_CNO2_c100)
   importance_normalRF_CNO2_c100.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO2_c100)),
-    model      = 'Cost c = 100',
+    model      = 'Cost c3',
     regressor  = names(importance_normalRF_CNO2_c100),
     importance = importance_normalRF_CNO2_c100,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO2_c100)]),
@@ -984,15 +1033,25 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 5.7/6.7
+  for (i in 1:length(pred_normalRF_prob_CNO2_c100$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO2_c100$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO2_c100$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO2_c100$predictions[i, '0'] * 5.7
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c100.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO2_c100$predictions[, '1'] * 100,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO2_c100$predictions[, '1'] * 100,
-    CNO2_AS_true = dataENS_test.dt$CNO2_AS_true,
-    CNO2_AS_raw  = dataENS_test.dt$CNO2_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO2_c100$predictions[, '1'],
+    score        = func_score,
+    CNO2_true = dataENS_test.dt$CNO2_true,
+    CNO2_raw  = dataENS_test.dt$CNO2_raw)
   
   pseudobias_eval_prob_c100.dt <- copy(pseudobias_eval_c100.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -1003,8 +1062,8 @@ for (iter in 1:nIter){
     CNO2_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c100.dt)){
     pseudobias_eval_prob_c100.dt[
-      1:i, CNO2_AS_running := CNO2_AS_true][
-        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_AS_raw]
+      1:i, CNO2_AS_running := CNO2_true][
+        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_raw]
     CNO2_running_total_prob_c100.dt <- rbindlist(list(
       CNO2_running_total_prob_c100.dt, 
       pseudobias_eval_prob_c100.dt[, list(ned = i, CNO2_running_total = sum(factor)), by = 'CNO2_AS_running']))
@@ -1012,7 +1071,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO2_running_total_prob_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'prob'][
     , pseudobias := abs(CNO2_running_total - CNO2_running_total[n])/CNO2_running_total[n], by = 'CNO2_AS_running']
   setcolorder(CNO2_running_total_prob_c100.dt, names(CNO2_total_prob.dt))
@@ -1031,8 +1090,8 @@ for (iter in 1:nIter){
     CNO2_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c100.dt)){
     pseudobias_eval_score_c100.dt[
-      1:i, CNO2_AS_running := CNO2_AS_true][
-        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_AS_raw]
+      1:i, CNO2_AS_running := CNO2_true][
+        is.na(CNO2_AS_running), CNO2_AS_running := CNO2_raw]
     CNO2_running_total_score_c100.dt <- rbindlist(list(
       CNO2_running_total_score_c100.dt, 
       pseudobias_eval_score_c100.dt[, list(ned = i, CNO2_running_total = sum(factor)), by = 'CNO2_AS_running']))
@@ -1040,7 +1099,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO2_running_total_score_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'score'][
     , pseudobias := abs(CNO2_running_total - CNO2_running_total[n])/CNO2_running_total[n], by = 'CNO2_AS_running']
   
@@ -1053,6 +1112,7 @@ for (iter in 1:nIter){
   CNO2_total.dt <- rbindlist(list(
     CNO2_total_prob.dt, CNO2_total_score.dt))  
 }
+
 
 #saveRDS(auc.dt, file = file.path(path_data, 'auc.dt'))
 #saveRDS(importance.dt, file = file.path(path_data, 'importance.dt'))
@@ -1070,19 +1130,17 @@ for (iter in 1:nIter){
   
   set.seed(seeds[iter])
   train_index <- createDataPartition(
-    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  # Division de toda la base de 
-  # datos en train (80%)
-  # y test (20%)
+    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  
   dataENS_train.dt <- dataENS.dt[train_index]
   dataENS_test.dt  <- dataENS.dt[-train_index]
   
   cat(' ok.\n')
   cat('    Computing cost-sensitive model CNO3...\n')
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 1                      ####
+  ####                      MODELO COST-SENSITIVE C = 1.4                    ####
   
   ## ..............................  CNO3  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 1            ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 1.4        ####
   
   set.seed(seeds[iter])
   normalRF_CNO3_c1 <- ranger(
@@ -1093,8 +1151,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -1119,7 +1177,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO3_test_c1), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 1',
+    model     = 'Cost c1',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO3',
@@ -1139,7 +1197,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO3_c1 <- importance(normalRF_CNO3_c1)
   importance_normalRF_CNO3_c1.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO3_c1)),
-    model      = 'Cost c = 1',
+    model      = 'Cost c1',
     regressor  = names(importance_normalRF_CNO3_c1),
     importance = importance_normalRF_CNO3_c1,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO3_c1)]),
@@ -1150,15 +1208,27 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 1.4/2.4
+  
+  func_score = list()
+  for (i in 1:length(pred_normalRF_prob_CNO3_c1$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO3_c1$predictions[i, '1'] > pthresh){
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO3_c1$predictions[i, '1']
+    } else {
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO3_c1$predictions[i, '0'] * 1.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c1.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO3_c1$predictions[, '1'] * 1,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO3_c1$predictions[, '1'] * 1,
-    CNO3_AS_true = dataENS_test.dt$CNO3_AS_true,
-    CNO3_AS_raw  = dataENS_test.dt$CNO3_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO3_c1$predictions[, '1'],
+    score        = func_score,
+    CNO3_true = dataENS_test.dt$CNO3_true,
+    CNO3_raw  = dataENS_test.dt$CNO3_raw)
   
   pseudobias_eval_prob_c1.dt <- copy(pseudobias_eval_c1.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -1169,8 +1239,8 @@ for (iter in 1:nIter){
     CNO3_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c1.dt)){
     pseudobias_eval_prob_c1.dt[
-      1:i, CNO3_AS_running := CNO3_AS_true][
-        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_AS_raw]
+      1:i, CNO3_AS_running := CNO3_true][
+        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_raw]
     CNO3_running_total_prob_c1.dt <- rbindlist(list(
       CNO3_running_total_prob_c1.dt, 
       pseudobias_eval_prob_c1.dt[, list(ned = i, CNO3_running_total = sum(factor)), by = 'CNO3_AS_running']))
@@ -1178,7 +1248,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO3_running_total_prob_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'prob'][
     , pseudobias := abs(CNO3_running_total - CNO3_running_total[n])/CNO3_running_total[n], by = 'CNO3_AS_running']
   setcolorder(CNO3_running_total_prob_c1.dt, names(CNO3_total_prob.dt))
@@ -1197,8 +1267,8 @@ for (iter in 1:nIter){
     CNO3_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c1.dt)){
     pseudobias_eval_score_c1.dt[
-      1:i, CNO3_AS_running := CNO3_AS_true][
-        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_AS_raw]
+      1:i, CNO3_AS_running := CNO3_true][
+        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_raw]
     CNO3_running_total_score_c1.dt <- rbindlist(list(
       CNO3_running_total_score_c1.dt, 
       pseudobias_eval_score_c1.dt[, list(ned = i, CNO3_running_total = sum(factor)), by = 'CNO3_AS_running']))
@@ -1206,7 +1276,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO3_running_total_score_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'score'][
     , pseudobias := abs(CNO3_running_total - CNO3_running_total[n])/CNO3_running_total[n], by = 'CNO3_AS_running']
   
@@ -1217,10 +1287,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 10                     ####
-
-  ## ..............................  CNO3  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 10          ####
+  ####                      MODELO COST-SENSITIVE C = 2.4                    ####
+  
+  ## ..............................  CNO3  ..................................   ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 2.4          ####
   
   set.seed(seeds[iter])
   normalRF_CNO3_c10 <- ranger(
@@ -1231,8 +1301,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -1257,7 +1327,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO3_test_c10), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 10',
+    model     = 'Cost c2',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO3',
@@ -1277,7 +1347,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO3_c10 <- importance(normalRF_CNO3_c10)
   importance_normalRF_CNO3_c10.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO3_c10)),
-    model      = 'Cost c = 10',
+    model      = 'Cost c2',
     regressor  = names(importance_normalRF_CNO3_c10),
     importance = importance_normalRF_CNO3_c10,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO3_c10)]),
@@ -1288,15 +1358,25 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 2.4/3.4
+  for (i in 1:length(pred_normalRF_prob_CNO3_c10$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO3_c10$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO3_c10$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO3_c10$predictions[i, '0'] * 2.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c10.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO3_c10$predictions[, '1'] * 10,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO3_c10$predictions[, '1'] * 10,
-    CNO3_AS_true = dataENS_test.dt$CNO3_AS_true,
-    CNO3_AS_raw  = dataENS_test.dt$CNO3_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO3_c10$predictions[, '1'],
+    score        = func_score,
+    CNO3_true = dataENS_test.dt$CNO3_true,
+    CNO3_raw  = dataENS_test.dt$CNO3_raw)
   
   pseudobias_eval_prob_c10.dt <- copy(pseudobias_eval_c10.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -1307,8 +1387,8 @@ for (iter in 1:nIter){
     CNO3_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c10.dt)){
     pseudobias_eval_prob_c10.dt[
-      1:i, CNO3_AS_running := CNO3_AS_true][
-        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_AS_raw]
+      1:i, CNO3_AS_running := CNO3_true][
+        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_raw]
     CNO3_running_total_prob_c10.dt <- rbindlist(list(
       CNO3_running_total_prob_c10.dt, 
       pseudobias_eval_prob_c10.dt[, list(ned = i, CNO3_running_total = sum(factor)), by = 'CNO3_AS_running']))
@@ -1316,7 +1396,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO3_running_total_prob_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'prob'][
     , pseudobias := abs(CNO3_running_total - CNO3_running_total[n])/CNO3_running_total[n], by = 'CNO3_AS_running']
   setcolorder(CNO3_running_total_prob_c10.dt, names(CNO3_total_prob.dt))
@@ -1335,8 +1415,8 @@ for (iter in 1:nIter){
     CNO3_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c10.dt)){
     pseudobias_eval_score_c10.dt[
-      1:i, CNO3_AS_running := CNO3_AS_true][
-        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_AS_raw]
+      1:i, CNO3_AS_running := CNO3_true][
+        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_raw]
     CNO3_running_total_score_c10.dt <- rbindlist(list(
       CNO3_running_total_score_c10.dt, 
       pseudobias_eval_score_c10.dt[, list(ned = i, CNO3_running_total = sum(factor)), by = 'CNO3_AS_running']))
@@ -1344,7 +1424,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO3_running_total_score_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'score'][
     , pseudobias := abs(CNO3_running_total - CNO3_running_total[n])/CNO3_running_total[n], by = 'CNO3_AS_running']
   
@@ -1355,10 +1435,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 100                    ####
- 
-  ## ..............................  CNO3  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 100          ####
+  ####                      MODELO COST-SENSITIVE C = 5.7                    ####
+  
+  ## ..............................  CNO3  ..................................  ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 5.7         ####
   
   set.seed(seeds[iter])
   normalRF_CNO3_c100 <- ranger(
@@ -1369,8 +1449,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+  )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -1395,7 +1475,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CNO3_test_c100), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 100',
+    model     = 'Cost c3',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CNO3',
@@ -1415,7 +1495,7 @@ for (iter in 1:nIter){
   importance_normalRF_CNO3_c100 <- importance(normalRF_CNO3_c100)
   importance_normalRF_CNO3_c100.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CNO3_c100)),
-    model      = 'Cost c = 100',
+    model      = 'Cost c3',
     regressor  = names(importance_normalRF_CNO3_c100),
     importance = importance_normalRF_CNO3_c100,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CNO3_c100)]),
@@ -1426,15 +1506,25 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 5.7/6.7
+  for (i in 1:length(pred_normalRF_prob_CNO3_c100$predictions[, '1'])){
+    if(pred_normalRF_prob_CNO3_c100$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO3_c100$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CNO3_c100$predictions[i, '0'] * 5.7
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c100.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CNO3_c100$predictions[, '1'] * 100,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CNO3_c100$predictions[, '1'] * 100,
-    CNO3_AS_true = dataENS_test.dt$CNO3_AS_true,
-    CNO3_AS_raw  = dataENS_test.dt$CNO3_AS_raw)
+    prob_error   = pred_normalRF_prob_CNO3_c100$predictions[, '1'],
+    score        = func_score,
+    CNO3_true = dataENS_test.dt$CNO3_true,
+    CNO3_raw  = dataENS_test.dt$CNO3_raw)
   
   pseudobias_eval_prob_c100.dt <- copy(pseudobias_eval_c100.dt)[
     , prob.rank  := frank(-prob_error, ties.method = 'min')]
@@ -1445,8 +1535,8 @@ for (iter in 1:nIter){
     CNO3_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_prob_c100.dt)){
     pseudobias_eval_prob_c100.dt[
-      1:i, CNO3_AS_running := CNO3_AS_true][
-        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_AS_raw]
+      1:i, CNO3_AS_running := CNO3_true][
+        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_raw]
     CNO3_running_total_prob_c100.dt <- rbindlist(list(
       CNO3_running_total_prob_c100.dt, 
       pseudobias_eval_prob_c100.dt[, list(ned = i, CNO3_running_total = sum(factor)), by = 'CNO3_AS_running']))
@@ -1454,7 +1544,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO3_running_total_prob_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'prob'][
     , pseudobias := abs(CNO3_running_total - CNO3_running_total[n])/CNO3_running_total[n], by = 'CNO3_AS_running']
   setcolorder(CNO3_running_total_prob_c100.dt, names(CNO3_total_prob.dt))
@@ -1473,8 +1563,8 @@ for (iter in 1:nIter){
     CNO3_running_total = numeric(0))
   for (i in 1:nrow(pseudobias_eval_score_c100.dt)){
     pseudobias_eval_score_c100.dt[
-      1:i, CNO3_AS_running := CNO3_AS_true][
-        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_AS_raw]
+      1:i, CNO3_AS_running := CNO3_true][
+        is.na(CNO3_AS_running), CNO3_AS_running := CNO3_raw]
     CNO3_running_total_score_c100.dt <- rbindlist(list(
       CNO3_running_total_score_c100.dt, 
       pseudobias_eval_score_c100.dt[, list(ned = i, CNO3_running_total = sum(factor)), by = 'CNO3_AS_running']))
@@ -1482,7 +1572,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CNO3_running_total_score_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'score'][
     , pseudobias := abs(CNO3_running_total - CNO3_running_total[n])/CNO3_running_total[n], by = 'CNO3_AS_running']
   
@@ -1495,6 +1585,7 @@ for (iter in 1:nIter){
   CNO3_total.dt <- rbindlist(list(
     CNO3_total_prob.dt, CNO3_total_score.dt))  
 }
+
 
 #saveRDS(auc.dt, file = file.path(path_data, 'auc.dt'))
 #saveRDS(importance.dt, file = file.path(path_data, 'importance.dt'))
@@ -1512,19 +1603,17 @@ for (iter in 1:nIter){
   
   set.seed(seeds[iter])
   train_index <- createDataPartition(
-    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  # Division de toda la base de 
-  # datos en train (80%)
-  # y test (20%)
+    dataENS.dt$CNO1_AS_raw, times=1, p=0.8, list=FALSE)  
   dataENS_train.dt <- dataENS.dt[train_index]
   dataENS_test.dt  <- dataENS.dt[-train_index]
   
   cat(' ok.\n')
   cat('    Computing cost-sensitive model CS...\n')
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 1                      ####
+  ####                      MODELO COST-SENSITIVE C = 1.4                    ####
   
   ## ..............................  CS  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 1            ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 1.4        ####
   
   set.seed(seeds[iter])
   normalRF_CS_c1 <- ranger(
@@ -1535,8 +1624,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+    )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -1561,7 +1650,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CS_test_c1), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 1',
+    model     = 'Cost c1',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CS',
@@ -1581,7 +1670,7 @@ for (iter in 1:nIter){
   importance_normalRF_CS_c1 <- importance(normalRF_CS_c1)
   importance_normalRF_CS_c1.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CS_c1)),
-    model      = 'Cost c = 1',
+    model      = 'Cost c1',
     regressor  = names(importance_normalRF_CS_c1),
     importance = importance_normalRF_CS_c1,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CS_c1)]),
@@ -1591,14 +1680,26 @@ for (iter in 1:nIter){
     importance.dt, importance_normalRF_CS_c1.dt
   ))
   cat('ok.\n')
+
+  pthresh = 1.4/2.4
+
+  func_score = list()
+  for (i in 1:length(pred_normalRF_prob_CS_c1$predictions[, '1'])){
+    if(pred_normalRF_prob_CS_c1$predictions[i, '1'] > pthresh){
+      func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CS_c1$predictions[i, '1']
+    } else {
+     func_score[i] <- dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CS_c1$predictions[i, '0'] * 1.4
+    }
+  }
   
-  
+  func_score <- as.numeric(func_score)
+
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c1.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CS_c1$predictions[, '1'] * 1,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CS_c1$predictions[, '1'] * 1,
+    prob_error   = pred_normalRF_prob_CS_c1$predictions[, '1'],
+    score        = func_score,
     claseSocial_true = dataENS_test.dt$claseSocial_true,
     claseSocial_raw  = dataENS_test.dt$claseSocial_raw)
   
@@ -1620,7 +1721,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CS_running_total_prob_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'prob'][
     , pseudobias := abs(CS_running_total - CS_running_total[n])/CS_running_total[n], by = 'CS_AS_running']
   setcolorder(CS_running_total_prob_c1.dt, names(CS_total_prob.dt))
@@ -1648,7 +1749,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CS_running_total_score_c1.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 1'][
+    , model := 'Cost c1'][
     , rank := 'score'][
     , pseudobias := abs(CS_running_total - CS_running_total[n])/CS_running_total[n], by = 'CS_AS_running']
   
@@ -1659,10 +1760,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 10                     ####
+  ####                      MODELO COST-SENSITIVE C = 2.4                    ####
 
-  ## ..............................  CS  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 10          ####
+  ## ..............................  CS  ..................................   ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 2.4          ####
   
   set.seed(seeds[iter])
   normalRF_CS_c10 <- ranger(
@@ -1673,8 +1774,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+    )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -1699,7 +1800,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CS_test_c10), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 10',
+    model     = 'Cost c2',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CS',
@@ -1719,7 +1820,7 @@ for (iter in 1:nIter){
   importance_normalRF_CS_c10 <- importance(normalRF_CS_c10)
   importance_normalRF_CS_c10.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CS_c10)),
-    model      = 'Cost c = 10',
+    model      = 'Cost c2',
     regressor  = names(importance_normalRF_CS_c10),
     importance = importance_normalRF_CS_c10,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CS_c10)]),
@@ -1730,13 +1831,23 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 2.4/3.4
+  for (i in 1:length(pred_normalRF_prob_CS_c10$predictions[, '1'])){
+    if(pred_normalRF_prob_CS_c10$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CS_c10$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CS_c10$predictions[i, '0'] * 2.4
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c10.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CS_c10$predictions[, '1'] * 10,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CS_c10$predictions[, '1'] * 10,
+    prob_error   = pred_normalRF_prob_CS_c10$predictions[, '1'],
+    score        = func_score,
     claseSocial_true = dataENS_test.dt$claseSocial_true,
     claseSocial_raw  = dataENS_test.dt$claseSocial_raw)
   
@@ -1758,7 +1869,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CS_running_total_prob_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'prob'][
     , pseudobias := abs(CS_running_total - CS_running_total[n])/CS_running_total[n], by = 'CS_AS_running']
   setcolorder(CS_running_total_prob_c10.dt, names(CS_total_prob.dt))
@@ -1786,7 +1897,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CS_running_total_score_c10.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 10'][
+    , model := 'Cost c2'][
     , rank := 'score'][
     , pseudobias := abs(CS_running_total - CS_running_total[n])/CS_running_total[n], by = 'CS_AS_running']
   
@@ -1797,10 +1908,10 @@ for (iter in 1:nIter){
   cat('ok.\n')
   
   ####  :::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::  ####
-  ####                      MODELO COST-SENSITIVE C = 100                    ####
+  ####                      MODELO COST-SENSITIVE C = 5.7                    ####
 
-  ## ..............................  CS  .................................. ####
-  # ** Ajuste del modelo de cost-sensitive random forest con c = 100          ####
+  ## ..............................  CS  ..................................  ####
+  # ** Ajuste del modelo de cost-sensitive random forest con c = 5.7         ####
   
   set.seed(seeds[iter])
   normalRF_CS_c100 <- ranger(
@@ -1811,8 +1922,8 @@ for (iter in 1:nIter){
     min.node.size = 9, 
     splitrule = 'gini',
     probability = TRUE,
-    importance = 'impurity',
-    class.weights = c(1,1))
+    importance = 'impurity'
+    )
   
   # ** Cálculo de las áreas bajo la curva AUC                                    ####
   cat('      Computing AUC...')
@@ -1837,7 +1948,7 @@ for (iter in 1:nIter){
                                        auc_normalRF_score_CS_test_c100), 3))
   tempAUC.dt <- data.table(
     iteration = rep(as.integer(iter), 4),
-    model     = 'Cost c = 100',
+    model     = 'Cost c3',
     rank      = auc_table[, 'rank'],
     dataset   = auc_table[, 'data'],
     variable  = 'CS',
@@ -1857,7 +1968,7 @@ for (iter in 1:nIter){
   importance_normalRF_CS_c100 <- importance(normalRF_CS_c100)
   importance_normalRF_CS_c100.dt <- data.table(
     iteration  = rep(as.integer(iter), length(importance_normalRF_CS_c100)),
-    model      = 'Cost c = 100',
+    model      = 'Cost c3',
     regressor  = names(importance_normalRF_CS_c100),
     importance = importance_normalRF_CS_c100,
     class      = factor(sapply(dataENS.dt, class)[names(importance_normalRF_CS_c100)]),
@@ -1868,13 +1979,23 @@ for (iter in 1:nIter){
   ))
   cat('ok.\n')
   
+  pthresh = 5.7/6.7
+  for (i in 1:length(pred_normalRF_prob_CS_c100$predictions[, '1'])){
+    if(pred_normalRF_prob_CS_c100$predictions[i, '1'] > pthresh){
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CS_c100$predictions[i, '1']
+    } else {
+      func_score[i] = dataENS_test.dt$FACTORADULTO[i] * pred_normalRF_prob_CS_c100$predictions[i, '0'] * 5.7
+    }
+  }
+  
+  func_score <- as.numeric(func_score)
   
   # ** Cálculo del pseudosesgo                                   ####
   cat('      Computing pseudobias (prob) ...')
   pseudobias_eval_c100.dt <- data.table(
     factor       = dataENS_test.dt$FACTORADULTO,
-    prob_error   = pred_normalRF_prob_CS_c100$predictions[, '1'] * 100,
-    score        = dataENS_test.dt$FACTORADULTO * pred_normalRF_prob_CS_c100$predictions[, '1'] * 100,
+    prob_error   = pred_normalRF_prob_CS_c100$predictions[, '1'],
+    score        = func_score,
     claseSocial_true = dataENS_test.dt$claseSocial_true,
     claseSocial_raw  = dataENS_test.dt$claseSocial_raw)
   
@@ -1896,7 +2017,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CS_running_total_prob_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'prob'][
     , pseudobias := abs(CS_running_total - CS_running_total[n])/CS_running_total[n], by = 'CS_AS_running']
   setcolorder(CS_running_total_prob_c100.dt, names(CS_total_prob.dt))
@@ -1924,7 +2045,7 @@ for (iter in 1:nIter){
   n <- nrow(dataENS_test.dt)
   CS_running_total_score_c100.dt[
     , iteration := as.integer(iter)][
-    , model := 'Cost c = 100'][
+    , model := 'Cost c3'][
     , rank := 'score'][
     , pseudobias := abs(CS_running_total - CS_running_total[n])/CS_running_total[n], by = 'CS_AS_running']
 
@@ -1938,8 +2059,9 @@ for (iter in 1:nIter){
     CS_total_prob.dt, CS_total_score.dt))  
 }
 
-saveRDS(auc.dt, file = file.path(path_data, 'auc.dt'))
-saveRDS(importance.dt, file = file.path(path_data, 'importance.dt'))
-saveRDS(CS_total_prob.dt, file = file.path(path_data, 'CS_total_prob.dt'))
-saveRDS(CS_total_score.dt, file = file.path(path_data, 'CS_total_score.dt'))
-saveRDS(CS_total.dt, file = file.path(path_data, 'CS_total.dt'))
+
+# saveRDS(auc.dt, file = file.path(path_data, 'auc.dt'))
+# saveRDS(importance.dt, file = file.path(path_data, 'importance.dt'))
+# saveRDS(CS_total_prob.dt, file = file.path(path_data, 'CS_total_prob.dt'))
+# saveRDS(CS_total_score.dt, file = file.path(path_data, 'CS_total_score.dt'))
+# saveRDS(CS_total.dt, file = file.path(path_data, 'CS_total.dt'))
